@@ -84,3 +84,57 @@ aarch64 是上游 Linux 发布架构之一，因此优先评估上游现成二�
 - 官方 Quick Start（内核要求、Single-arm gateways）：https://daeuniverse.org/honk/how-to-start
 - 官方 NFQUEUE 设计：https://daeuniverse.org/honk/design/nfqueue
 - 官方配置参考：https://daeuniverse.org/honk/reference/global
+
+## N1 实机补充检查（2026-11-16）
+
+以下内容来自设备只读检查；本次仅更新文档，没有在 N1 上安装 Honk 或修改网络配置。
+
+### Honk 安装状态
+
+- `command -v honk` 无输出。
+- `pidof honk`、`ps w | grep '[h]onk'` 均未发现运行进程。
+- `/etc/init.d/honk` 不存在。
+- `/etc/honk/` 不存在，常见目录下 `find` 未发现 Honk 文件。
+- `opkg` 命令不存在；这只说明当前系统没有该命令，不能据此推断其他软件包管理能力。
+
+结论：本阶段是源码和构建适配研究，不是对现有 Honk 实例进行配置调整。
+
+### LAN 防火墙与 NAT 实测
+
+LAN zone 当前配置：
+
+```
+name='lan'
+input='ACCEPT'
+output='ACCEPT'
+forward='ACCEPT'
+network='lan' 'lan6'
+```
+
+未配置 LAN zone masquerading。当前 `inet fw4 srcnat_lan` 仅有：
+
+```
+ip saddr 172.16.0.0/12 masquerade
+```
+
+该规则覆盖 Docker 地址段，不是针对普通 `192.168.5.0/24` 客户端的通用 NAT。由此确认：当前 fw4 的 LAN 源 NAT 链没有普通 LAN 客户端的通用 masquerade 规则。
+
+这与单臂网关可能出现的非对称回程问题相关，但不能据此直接启用整个 LAN zone 的 masquerading。后续应评估更精细的 NAT 范围，并测试 LAN 设备互访、源地址可见性、Tailscale、OpenClash 及现有转发行为。
+
+### QuickStart dhns 实测
+
+`dhns` namespace 当前仅显示：
+
+```
+192.168.100.0/24 dev dheth1 proto kernel scope link src 192.168.100.1
+```
+
+接口 `dheth1` 地址为 `192.168.100.1/24`，未显示默认 IPv4 路由。当前证据未显示 dhns 具有默认互联网出口；但由于 `dheth0` 是 `br-lan` 的桥接端口，仍需在 Honk 实际运行时检查接口绑定和 QuickStart 相关功能，不能仅凭路由表认定无影响。
+
+### 当前安全边界
+
+- 不在现网安装、启动 Honk。
+- 不修改 sysctl、防火墙、NAT、路由或主路由 DHCP。
+- 不将尚未验证的构建产物标记为可用安装包。
+- 后续先做源码审查和可重复构建，再在可回滚的隔离环境验证透明代理数据路径。
+
