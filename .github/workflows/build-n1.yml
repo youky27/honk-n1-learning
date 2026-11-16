@@ -1,0 +1,136 @@
+name: Build Honk for Phicomm N1
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: aarch64 musl / full / stock allocator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout pinned Honk source
+        uses: actions/checkout@v4
+        with:
+          repository: daeuniverse/honk
+          ref: a9925bd7626fc487755329647f0f3bb4466a24b1
+          path: honk
+
+      - name: Read pinned Rust toolchains
+        id: toolchain
+        working-directory: honk
+        shell: bash
+        run: |
+          set -euo pipefail
+          stable=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          ebpf=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' crates/honk-ebpf/rust-toolchain.toml)
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+          echo "ebpf=$ebpf" >> "$GITHUB_OUTPUT"
+
+      - name: Install stable Rust and aarch64 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.stable }}
+          target: aarch64-unknown-linux-musl
+
+      - name: Install pinned eBPF nightly
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.ebpf }}
+          components: rust-src, llvm-tools
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev pkg-config cmake libclang-dev zstd binutils
+
+      - name: Install pinned bpf-linker
+        working-directory: honk
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/ci/pins.env
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bpf-linker.tar.zst" \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v$BPF_LINKER_VERSION/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          echo "$BPF_LINKER_SHA256  $RUNNER_TEMP/bpf-linker.tar.zst" | sha256sum -c -
+          zstd -dc "$RUNNER_TEMP/bpf-linker.tar.zst" | tar -xf - -C "$CARGO_HOME/bin"
+          bpf-linker --version
+
+      - name: Build eBPF object with its pinned nightly
+        working-directory: honk/crates/honk-ebpf
+        run: env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release -Zbuild-std=core --target bpfel-unknown-none
+
+      - name: Verify eBPF BTF section
+        working-directory: honk
+        run: readelf -S crates/honk-ebpf/target/bpfel-unknown-none/release/honk-ebpf | grep -Fq '.BTF'
+
+      - name: Install Zig cross compiler
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Fetch pinned embedded UI
+        working-directory: honk
+        run: |
+          set -euo pipefail
+          dir=$(ci/fetch-doona.sh)
+          echo "HONK_DOONA_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Build Honk for N1
+        working-directory: honk
+        shell: bash
+        run: |
+          set -euo pipefail
+          T=aarch64-unknown-linux-musl
+          export ZIGCC_TARGET=aarch64-linux-musl
+          L=$(printf '%s' "$T" | tr '-' '_')
+          U=$(printf '%s' "$T" | tr 'a-z-' 'A-Z_')
+          export "CC_${L}=$PWD/ci/zigcc"
+          export "CXX_${L}=$PWD/ci/zigcxx"
+          export "CARGO_TARGET_${U}_LINKER=$PWD/ci/zigcc"
+          export "CARGO_TARGET_${U}_RUSTFLAGS=-C link-self-contained=no"
+          export BINDGEN_EXTRA_CLANG_ARGS="$(ci/zig-bindgen-env "$ZIGCC_TARGET")"
+          # Full feature set, but stock allocator to reduce memory overhead on a small gateway.
+          cargo build --release -p honk-core --no-default-features \
+            --features "ebpf,rprx,clash-api,native-ui" --target "$T"
+
+      - name: Package and verify N1 artifact
+        working-directory: honk
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=honk-core-n1-aarch64-unknown-linux-musl-full-stock
+          mkdir -p "dist/$name"
+          cp target/aarch64-unknown-linux-musl/release/honk-core "dist/$name/"
+          cp LICENSE README.md "dist/$name/"
+          for edition in doona doona-lite; do
+            ui_dir="$HONK_DOONA_DIR"
+            [[ "$edition" != doona-lite ]] || ui_dir="${HONK_DOONA_DIR%/}-lite"
+            cmp -s LICENSE "$ui_dir/LICENSE"
+            mkdir "dist/$name/$edition"
+            cp -r "$ui_dir"/{LICENSES,NOTICE,THIRD-PARTY-NOTICES.txt} "dist/$name/$edition/"
+          done
+          {
+            echo "Honk source: a9925bd7626fc487755329647f0f3bb4466a24b1"
+            echo "Target: aarch64-unknown-linux-musl"
+            echo "Device: Phicomm N1 / iStoreOS"
+            echo "Features: ebpf,rprx,clash-api,native-ui"
+            echo "Allocator: system (stock)"
+            echo "NFQUEUE: Honk runtime config must set nfqueue_enable: false for this initial N1 test"
+          } > "dist/$name/BUILD-INFO.txt"
+          readelf -h "dist/$name/honk-core" | grep -E 'Machine:.*AArch64'
+          tar -czf "$name.tar.gz" -C dist "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: honk-n1-aarch64-musl-full-stock
+          path: |
+            honk/honk-core-n1-aarch64-unknown-linux-musl-full-stock.tar.gz
+            honk/honk-core-n1-aarch64-unknown-linux-musl-full-stock.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
