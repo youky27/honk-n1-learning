@@ -25,10 +25,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "stable=$stable" >> "$GITHUB_OUTPUT"
-          echo "ebpf=$ebpf" >> "$GITHUB_OUTPUT"
           stable=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
           ebpf=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' crates/honk-ebpf/rust-toolchain.toml)
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+          echo "ebpf=$ebpf" >> "$GITHUB_OUTPUT"
 
       - name: Install stable Rust and aarch64 target
         uses: dtolnay/rust-toolchain@stable
